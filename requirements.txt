@@ -5,6 +5,10 @@ lxml>=4.9.0
 pandas>=2.0.0
 python-dotenv>=1.0.0
 
+# SSL/TLS support (important for Windows)
+certifi>=2023.7.22
+urllib3>=2.0.0
+
 # Google Maps API
 googlemaps>=4.10.0
 

@@ -84,6 +84,21 @@ GOOGLE_MAPS_API_KEY=your_actual_api_key_here
 
 **Note:** Google Maps API has a free tier with $200 monthly credit, which is sufficient for moderate usage.
 
+### Test Your Setup
+
+Before running prospecting campaigns, test your configuration:
+```bash
+python test_connection.py
+```
+
+This will verify:
+- Python and package installation
+- SSL/TLS connectivity
+- Google Maps API configuration
+- Network connectivity
+
+**Having issues?** See [TROUBLESHOOTING.md](TROUBLESHOOTING.md) for detailed solutions to common problems.
+
 ## Usage
 
 ### Basic Usage

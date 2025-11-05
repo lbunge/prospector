@@ -2,8 +2,26 @@
 
 import googlemaps
 import time
+import ssl
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+from urllib3.util.ssl_ import create_urllib3_context
 from typing import List, Dict, Optional, Tuple
 from .config import Config
+
+
+class SSLAdapter(HTTPAdapter):
+    """Custom SSL adapter to handle SSL/TLS issues on Windows."""
+
+    def init_poolmanager(self, *args, **kwargs):
+        """Initialize pool manager with custom SSL context."""
+        # Create a custom SSL context that's more permissive
+        ctx = create_urllib3_context()
+        ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+        ctx.options |= 0x4  # OP_LEGACY_SERVER_CONNECT
+        kwargs['ssl_context'] = ctx
+        return super().init_poolmanager(*args, **kwargs)
 
 
 class GoogleMapsScaper:
@@ -20,7 +38,39 @@ class GoogleMapsScaper:
         if not self.api_key:
             raise ValueError("Google Maps API key is required")
 
-        self.client = googlemaps.Client(key=self.api_key)
+        # Create a session with retry logic and SSL handling
+        session = self._create_session()
+
+        # Initialize Google Maps client with custom session
+        self.client = googlemaps.Client(
+            key=self.api_key,
+            requests_session=session,
+            retry_timeout=30
+        )
+
+    def _create_session(self) -> requests.Session:
+        """
+        Create a requests session with retry logic and SSL handling.
+
+        Returns:
+            Configured requests Session
+        """
+        session = requests.Session()
+
+        # Configure retry strategy
+        retry_strategy = Retry(
+            total=5,  # Total retries
+            backoff_factor=1,  # Wait 1, 2, 4, 8, 16 seconds between retries
+            status_forcelist=[429, 500, 502, 503, 504],
+            allowed_methods=["HEAD", "GET", "OPTIONS", "POST"]
+        )
+
+        # Mount SSL adapter with retry strategy
+        adapter = SSLAdapter(max_retries=retry_strategy)
+        session.mount("https://", adapter)
+        session.mount("http://", adapter)
+
+        return session
 
     def search_businesses(
         self,
