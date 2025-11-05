@@ -17,10 +17,20 @@ class EmailFinder:
         r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
     )
 
-    # Common contact page patterns
+    # Common contact page patterns (expanded)
     CONTACT_PAGE_PATTERNS = [
         'contact', 'contact-us', 'contactus', 'about', 'about-us',
-        'team', 'staff', 'connect', 'reach', 'get-in-touch'
+        'team', 'staff', 'connect', 'reach', 'get-in-touch',
+        'locations', 'find-us', 'visit', 'office', 'headquarters',
+        'support', 'help', 'customer-service', 'inquiry', 'sales',
+        'leadership', 'management', 'people', 'our-team', 'meet-the-team'
+    ]
+
+    # Additional email patterns for obfuscated emails
+    OBFUSCATED_PATTERNS = [
+        re.compile(r'([a-zA-Z0-9._%+-]+)\s*\[at\]\s*([a-zA-Z0-9.-]+)\s*\[dot\]\s*([a-zA-Z]{2,})'),
+        re.compile(r'([a-zA-Z0-9._%+-]+)\s*@\s*([a-zA-Z0-9.-]+)\s*\.\s*([a-zA-Z]{2,})'),
+        re.compile(r'([a-zA-Z0-9._%+-]+)\s*\(at\)\s*([a-zA-Z0-9.-]+)\s*\(dot\)\s*([a-zA-Z]{2,})'),
     ]
 
     def __init__(self):
@@ -103,7 +113,7 @@ class EmailFinder:
 
     def _get_pages_to_crawl(self, website_url: str, max_pages: int) -> List[str]:
         """
-        Get list of pages to crawl, prioritizing contact pages.
+        Get list of pages to crawl, prioritizing contact pages with depth-based search.
 
         Args:
             website_url: Base website URL
@@ -112,50 +122,92 @@ class EmailFinder:
         Returns:
             List of URLs to crawl
         """
-        pages = [website_url]  # Always crawl homepage first
+        pages_to_visit = [website_url]  # Always crawl homepage first
+        visited = set()
+        contact_pages = []
+        other_pages = []
 
-        try:
-            # Get homepage to find contact pages
-            response = self.session.get(
-                website_url,
-                timeout=Config.REQUEST_TIMEOUT,
-                allow_redirects=True
-            )
-            response.raise_for_status()
+        base_domain = urlparse(website_url).netloc
+        max_depth = Config.MAX_DEPTH_PER_WEBSITE
 
-            soup = BeautifulSoup(response.text, 'html.parser')
-            base_domain = urlparse(website_url).netloc
+        for depth in range(max_depth):
+            if len(pages_to_visit) == 0:
+                break
 
-            # Find all links
-            links = soup.find_all('a', href=True)
+            current_level = pages_to_visit[:max_pages * 2]  # Limit per level
+            pages_to_visit = []
 
-            # Look for contact pages
-            contact_pages = []
-            for link in links:
-                href = link['href']
-                full_url = urljoin(website_url, href)
-
-                # Only include links from same domain
-                if urlparse(full_url).netloc != base_domain:
+            for page_url in current_level:
+                if page_url in visited:
                     continue
 
-                # Check if it's a contact-related page
-                href_lower = href.lower()
-                if any(pattern in href_lower for pattern in self.CONTACT_PAGE_PATTERNS):
-                    if full_url not in pages and full_url not in contact_pages:
-                        contact_pages.append(full_url)
+                if len(visited) >= max_pages * 3:  # Stop if we've looked at too many
+                    break
 
-            # Add contact pages (prioritized)
-            pages.extend(contact_pages[:max_pages - 1])
+                try:
+                    visited.add(page_url)
 
-        except Exception as e:
-            print(f"  Warning: Error finding contact pages: {e}")
+                    response = self.session.get(
+                        page_url,
+                        timeout=Config.REQUEST_TIMEOUT,
+                        allow_redirects=True
+                    )
+                    response.raise_for_status()
 
-        return pages[:max_pages]
+                    soup = BeautifulSoup(response.text, 'html.parser')
+
+                    # Find all links
+                    links = soup.find_all('a', href=True)
+
+                    for link in links:
+                        href = link['href']
+                        full_url = urljoin(page_url, href)
+
+                        # Clean URL (remove fragments and query params for deduplication)
+                        parsed = urlparse(full_url)
+                        clean_url = f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+                        # Only include links from same domain
+                        if urlparse(clean_url).netloc != base_domain:
+                            continue
+
+                        # Skip already visited
+                        if clean_url in visited:
+                            continue
+
+                        # Skip non-HTML links
+                        if any(ext in clean_url.lower() for ext in ['.pdf', '.jpg', '.png', '.gif', '.zip', '.doc']):
+                            continue
+
+                        # Check if it's a contact-related page
+                        href_lower = full_url.lower()
+                        is_contact = any(pattern in href_lower for pattern in self.CONTACT_PAGE_PATTERNS)
+
+                        if is_contact and clean_url not in contact_pages:
+                            contact_pages.append(clean_url)
+                        elif depth < max_depth - 1 and clean_url not in other_pages:
+                            # Add for next level crawling
+                            pages_to_visit.append(clean_url)
+                            other_pages.append(clean_url)
+
+                except Exception as e:
+                    # Silently continue on errors during page discovery
+                    continue
+
+        # Prioritize: homepage + contact pages + other pages
+        result_pages = [website_url]
+        result_pages.extend(contact_pages[:max_pages - 1])
+
+        # Fill remaining slots with other pages if needed
+        remaining_slots = max_pages - len(result_pages)
+        if remaining_slots > 0:
+            result_pages.extend(other_pages[:remaining_slots])
+
+        return result_pages[:max_pages]
 
     def _extract_emails_from_page(self, url: str) -> Set[str]:
         """
-        Extract email addresses from a single page.
+        Extract email addresses from a single page with enhanced detection.
 
         Args:
             url: Page URL
@@ -176,27 +228,105 @@ class EmailFinder:
             # Find emails in HTML
             soup = BeautifulSoup(response.text, 'html.parser')
 
+            # 1. Check mailto links (highest priority)
+            mailto_links = soup.find_all('a', href=re.compile(r'^mailto:', re.I))
+            for link in mailto_links:
+                email = link['href'].replace('mailto:', '').split('?')[0].strip()
+                if email:
+                    emails.add(email.lower())
+
+            # 2. Check data attributes (sometimes emails are hidden in data-* attributes)
+            for tag in soup.find_all(attrs={'data-email': True}):
+                email = tag.get('data-email', '').strip()
+                if email:
+                    emails.add(email.lower())
+
+            # 3. Check for cloudflare email protection
+            cloudflare_emails = soup.find_all('a', class_=re.compile(r'__cf_email__'))
+            for email_tag in cloudflare_emails:
+                # Cloudflare obfuscates emails, but the link text might contain it
+                if email_tag.get('data-cfemail'):
+                    # Would need to decode, skip for now
+                    pass
+
+            # 4. Get text content
             # Remove script and style elements
             for script in soup(['script', 'style']):
                 script.decompose()
 
-            # Get text content
             text = soup.get_text()
 
-            # Also check mailto links
-            mailto_links = soup.find_all('a', href=re.compile(r'^mailto:', re.I))
-            for link in mailto_links:
-                email = link['href'].replace('mailto:', '').split('?')[0]
-                emails.add(email)
+            # Also check HTML source for hidden emails
+            html_source = response.text
 
-            # Find emails using regex
+            # 5. Find regular emails using regex
             found_emails = self.EMAIL_PATTERN.findall(text)
-            emails.update(found_emails)
+            emails.update([e.lower() for e in found_emails])
+
+            # Also search in HTML source
+            source_emails = self.EMAIL_PATTERN.findall(html_source)
+            emails.update([e.lower() for e in source_emails])
+
+            # 6. Find obfuscated emails (e.g., "name [at] domain [dot] com")
+            for pattern in self.OBFUSCATED_PATTERNS:
+                matches = pattern.findall(text)
+                for match in matches:
+                    if len(match) == 3:
+                        # Reconstruct email
+                        email = f"{match[0]}@{match[1]}.{match[2]}"
+                        emails.add(email.lower())
+
+            # 7. Look for emails in JavaScript variables
+            js_pattern = re.compile(r'["\']([a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})["\']')
+            js_emails = js_pattern.findall(html_source)
+            emails.update([e.lower() for e in js_emails])
+
+            # 8. Filter out common false positives
+            emails = {e for e in emails if self._is_likely_real_email(e)}
 
         except Exception as e:
-            print(f"  Warning: Error extracting emails from {url}: {e}")
+            # Silently fail for individual page errors
+            pass
 
         return emails
+
+    def _is_likely_real_email(self, email: str) -> bool:
+        """
+        Check if an email looks like a real business email (not a false positive).
+
+        Args:
+            email: Email address to check
+
+        Returns:
+            True if likely real
+        """
+        email_lower = email.lower()
+
+        # Filter out common false positives
+        false_positives = [
+            'example@example.com',
+            'email@example.com',
+            'your@email.com',
+            'name@example.com',
+            'user@example.com',
+            'test@test.com',
+            'admin@localhost',
+            'noreply@',
+            'no-reply@',
+            '@example.',
+            '@test.',
+            '@localhost',
+        ]
+
+        for fp in false_positives:
+            if fp in email_lower:
+                return False
+
+        # Must have proper structure
+        if '@' not in email or '.' not in email.split('@')[1]:
+            return False
+
+        return True
 
     def _classify_email(self, email: str, source_url: Optional[str] = None) -> Optional[Dict]:
         """

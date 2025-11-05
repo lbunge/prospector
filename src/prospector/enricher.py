@@ -4,6 +4,7 @@ import time
 from typing import List, Dict, Optional
 from .maps_scraper import GoogleMapsScaper
 from .email_finder import EmailFinder
+from .website_finder import WebsiteFinder
 from .config import Config
 
 
@@ -19,6 +20,7 @@ class BusinessEnricher:
         """
         self.maps_scraper = GoogleMapsScaper(api_key)
         self.email_finder = EmailFinder()
+        self.website_finder = WebsiteFinder()
 
     def prospect_area(
         self,
@@ -75,18 +77,66 @@ class BusinessEnricher:
             enriched['generic_emails'] = []
             enriched['person_emails'] = []
             enriched['social_media'] = {}
+            enriched['website_method'] = None
 
-            # Find emails if website exists
-            if find_emails and business.get('website'):
+            # Step 1: Try to find website if not provided by Google
+            website = business.get('website')
+            if not website and (find_emails or find_social):
+                print(f"  → No website in Google Maps, searching...")
+                try:
+                    website_result = self.website_finder.find_website(
+                        business['name'],
+                        business.get('formatted_address') or business.get('address'),
+                        business.get('phone')
+                    )
+
+                    if website_result['website']:
+                        website = website_result['website']
+                        enriched['website'] = website
+                        enriched['website_method'] = website_result['method']
+                        enriched['website_confidence'] = website_result['confidence']
+                        print(f"  ✓ Found website: {website} ({website_result['method']})")
+                    else:
+                        print(f"  ✗ Could not find website")
+
+                    time.sleep(0.3)  # Be respectful
+
+                except Exception as e:
+                    print(f"  ✗ Error searching for website: {e}")
+
+            # Step 2: Find social media first (might help find website)
+            if find_social and website:
+                try:
+                    enriched['social_media'] = self.email_finder.find_social_media(website)
+
+                    if enriched['social_media']:
+                        platforms = ', '.join(enriched['social_media'].keys())
+                        print(f"  ✓ Found social media: {platforms}")
+
+                        # Try to find website from social media if we don't have one
+                        if not website:
+                            social_website = self.website_finder.enrich_from_social_media(
+                                enriched['social_media']
+                            )
+                            if social_website:
+                                website = social_website
+                                enriched['website'] = website
+                                enriched['website_method'] = 'social_media'
+                                print(f"  ✓ Found website from social media: {website}")
+
+                except Exception as e:
+                    print(f"  ✗ Error finding social media: {e}")
+
+            # Step 3: Find emails from website
+            if find_emails and website:
                 print(f"  → Searching for emails on website...")
                 try:
-                    email_result = self.email_finder.find_emails_from_website(
-                        business['website']
-                    )
+                    email_result = self.email_finder.find_emails_from_website(website)
 
                     if email_result['status'] == 'success':
                         enriched['emails_found'] = email_result['emails']
                         enriched['email_count'] = len(email_result['emails'])
+                        enriched['pages_crawled'] = email_result.get('pages_crawled', 0)
 
                         # Separate generic and person emails
                         enriched['generic_emails'] = [
@@ -98,9 +148,13 @@ class BusinessEnricher:
                             if e['type'] == 'person'
                         ]
 
-                        print(f"  ✓ Found {enriched['email_count']} emails "
-                              f"({len(enriched['generic_emails'])} generic, "
-                              f"{len(enriched['person_emails'])} person)")
+                        if enriched['email_count'] > 0:
+                            print(f"  ✓ Found {enriched['email_count']} emails "
+                                  f"({len(enriched['generic_emails'])} generic, "
+                                  f"{len(enriched['person_emails'])} person) "
+                                  f"from {enriched['pages_crawled']} pages")
+                        else:
+                            print(f"  ○ No emails found on website")
                     else:
                         print(f"  ✗ Email search failed: {email_result['error']}")
 
@@ -109,21 +163,8 @@ class BusinessEnricher:
                 except Exception as e:
                     print(f"  ✗ Error finding emails: {e}")
 
-            elif not business.get('website'):
-                print(f"  → No website available for email search")
-
-            # Find social media
-            if find_social and business.get('website'):
-                try:
-                    enriched['social_media'] = self.email_finder.find_social_media(
-                        business['website']
-                    )
-                    if enriched['social_media']:
-                        platforms = ', '.join(enriched['social_media'].keys())
-                        print(f"  ✓ Found social media: {platforms}")
-
-                except Exception as e:
-                    print(f"  ✗ Error finding social media: {e}")
+            elif not website:
+                print(f"  ○ No website available for scraping")
 
             enriched_businesses.append(enriched)
 

@@ -95,6 +95,24 @@ Common business types:
         help='Google Maps API key (overrides .env file)'
     )
 
+    parser.add_argument(
+        '--aggressive',
+        action='store_true',
+        help='Aggressive mode: maximum data collection (slower but more thorough)'
+    )
+
+    parser.add_argument(
+        '--no-grid-search',
+        action='store_true',
+        help='Disable grid search (faster but may miss businesses)'
+    )
+
+    parser.add_argument(
+        '--max-pages',
+        type=int,
+        help='Maximum pages to crawl per website (default: 10, aggressive: 15)'
+    )
+
     args = parser.parse_args()
 
     try:
@@ -103,6 +121,18 @@ Common business types:
             Config.GOOGLE_MAPS_API_KEY = args.api_key
 
         Config.validate()
+
+        # Set aggressive mode if requested
+        if args.aggressive:
+            Config.set_aggressive_mode(True)
+            print("🚀 Aggressive mode enabled - maximum data collection")
+
+        # Override config with CLI args
+        if args.no_grid_search:
+            Config.USE_GRID_SEARCH = False
+
+        if args.max_pages:
+            Config.MAX_PAGES_PER_WEBSITE = args.max_pages
 
         # Initialize enricher
         enricher = BusinessEnricher()

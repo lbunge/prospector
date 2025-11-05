@@ -4,10 +4,11 @@ import googlemaps
 import time
 import ssl
 import requests
+import math
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from urllib3.util.ssl_ import create_urllib3_context
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Set
 from .config import Config
 
 
@@ -72,65 +73,256 @@ class GoogleMapsScaper:
 
         return session
 
+    def _generate_grid_points(
+        self,
+        center_lat: float,
+        center_lng: float,
+        radius: int,
+        grid_size: int = None
+    ) -> List[Tuple[float, float]]:
+        """
+        Generate a grid of points to search for comprehensive coverage.
+
+        Args:
+            center_lat: Center latitude
+            center_lng: Center longitude
+            radius: Search radius in meters
+            grid_size: Size of each grid cell in meters
+
+        Returns:
+            List of (lat, lng) tuples for grid search points
+        """
+        if grid_size is None:
+            grid_size = Config.GRID_SIZE_METERS
+
+        # Calculate how many grid points we need
+        # Each grid point covers grid_size radius
+        num_points = math.ceil(radius / grid_size)
+
+        # Convert meters to approximate degrees
+        # At equator: 1 degree ≈ 111,320 meters
+        # For latitude, this is roughly constant
+        # For longitude, it varies by latitude
+        lat_degree = grid_size / 111320.0
+        lng_degree = grid_size / (111320.0 * math.cos(math.radians(center_lat)))
+
+        points = []
+
+        # Generate grid around center point
+        for lat_offset in range(-num_points, num_points + 1):
+            for lng_offset in range(-num_points, num_points + 1):
+                lat = center_lat + (lat_offset * lat_degree)
+                lng = center_lng + (lng_offset * lng_degree)
+
+                # Check if point is within original search radius
+                distance = self._haversine_distance(
+                    center_lat, center_lng, lat, lng
+                )
+
+                if distance <= radius:
+                    points.append((lat, lng))
+
+        return points
+
+    def _haversine_distance(
+        self,
+        lat1: float,
+        lon1: float,
+        lat2: float,
+        lon2: float
+    ) -> float:
+        """
+        Calculate distance between two points in meters using Haversine formula.
+
+        Args:
+            lat1, lon1: First point
+            lat2, lon2: Second point
+
+        Returns:
+            Distance in meters
+        """
+        R = 6371000  # Earth's radius in meters
+
+        phi1 = math.radians(lat1)
+        phi2 = math.radians(lat2)
+        delta_phi = math.radians(lat2 - lat1)
+        delta_lambda = math.radians(lon2 - lon1)
+
+        a = (math.sin(delta_phi / 2) ** 2 +
+             math.cos(phi1) * math.cos(phi2) *
+             math.sin(delta_lambda / 2) ** 2)
+
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+        return R * c
+
     def search_businesses(
         self,
         location: str,
         radius: int = 5000,
         business_type: Optional[str] = None,
-        keyword: Optional[str] = None
+        keyword: Optional[str] = None,
+        use_grid_search: bool = None
     ) -> List[Dict]:
         """
-        Search for businesses in a specific area.
+        Search for businesses in a specific area with optional grid search for thorough coverage.
 
         Args:
             location: Address or coordinates (e.g., "downtown Seattle" or "47.6062,-122.3321")
             radius: Search radius in meters (default 5000m = ~3 miles)
             business_type: Business type filter (e.g., "restaurant", "retail", "lawyer")
             keyword: Additional keyword to filter results
+            use_grid_search: Whether to use grid search (default from config)
 
         Returns:
             List of business dictionaries with basic information
         """
+        if use_grid_search is None:
+            use_grid_search = Config.USE_GRID_SEARCH and radius > Config.GRID_SIZE_METERS
+
         # Geocode the location to get coordinates
         geocode_result = self.client.geocode(location)
         if not geocode_result:
             raise ValueError(f"Could not geocode location: {location}")
 
         location_coords = geocode_result[0]['geometry']['location']
-        lat_lng = (location_coords['lat'], location_coords['lng'])
+        center_lat = location_coords['lat']
+        center_lng = location_coords['lng']
 
-        print(f"Searching businesses near {location} ({lat_lng})")
+        print(f"Searching businesses near {location} ({center_lat}, {center_lng})")
         print(f"Radius: {radius}m, Type: {business_type or 'any'}, Keyword: {keyword or 'none'}")
 
-        # Search for places
+        if use_grid_search:
+            print(f"Using grid search for comprehensive coverage...")
+            return self._grid_search_businesses(
+                center_lat, center_lng, radius, business_type, keyword
+            )
+        else:
+            return self._single_point_search(
+                (center_lat, center_lng), radius, business_type, keyword
+            )
+
+    def _single_point_search(
+        self,
+        lat_lng: Tuple[float, float],
+        radius: int,
+        business_type: Optional[str] = None,
+        keyword: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        Search for businesses from a single point.
+
+        Args:
+            lat_lng: (latitude, longitude) tuple
+            radius: Search radius in meters
+            business_type: Business type filter
+            keyword: Keyword filter
+
+        Returns:
+            List of business dictionaries
+        """
         all_results = []
         next_page_token = None
+        seen_place_ids: Set[str] = set()
 
-        while True:
-            if next_page_token:
-                # Wait before requesting next page (required by API)
-                time.sleep(2)
-                places_result = self.client.places_nearby(
-                    location=lat_lng,
-                    page_token=next_page_token
-                )
-            else:
-                places_result = self.client.places_nearby(
-                    location=lat_lng,
-                    radius=radius,
-                    type=business_type,
-                    keyword=keyword
-                )
+        # Google Places API returns max 60 results (20 per page, 3 pages)
+        page = 0
+        while page < 3:  # Max 3 pages
+            try:
+                if next_page_token:
+                    # Wait before requesting next page (required by API)
+                    time.sleep(2)
+                    places_result = self.client.places_nearby(
+                        location=lat_lng,
+                        page_token=next_page_token
+                    )
+                else:
+                    places_result = self.client.places_nearby(
+                        location=lat_lng,
+                        radius=radius,
+                        type=business_type,
+                        keyword=keyword
+                    )
 
-            all_results.extend(places_result.get('results', []))
+                results = places_result.get('results', [])
 
-            # Check if there are more results
-            next_page_token = places_result.get('next_page_token')
-            if not next_page_token:
+                # Deduplicate based on place_id
+                for result in results:
+                    place_id = result.get('place_id')
+                    if place_id and place_id not in seen_place_ids:
+                        seen_place_ids.add(place_id)
+                        all_results.append(result)
+
+                # Check if there are more results
+                next_page_token = places_result.get('next_page_token')
+                if not next_page_token:
+                    break
+
+                page += 1
+
+            except Exception as e:
+                print(f"  Warning: Error fetching page {page + 1}: {e}")
                 break
 
-        print(f"Found {len(all_results)} businesses")
         return all_results
+
+    def _grid_search_businesses(
+        self,
+        center_lat: float,
+        center_lng: float,
+        radius: int,
+        business_type: Optional[str] = None,
+        keyword: Optional[str] = None
+    ) -> List[Dict]:
+        """
+        Perform grid-based search for comprehensive coverage.
+
+        Args:
+            center_lat: Center latitude
+            center_lng: Center longitude
+            radius: Search radius in meters
+            business_type: Business type filter
+            keyword: Keyword filter
+
+        Returns:
+            Deduplicated list of businesses
+        """
+        # Generate grid points
+        grid_points = self._generate_grid_points(center_lat, center_lng, radius)
+
+        print(f"  Grid search: {len(grid_points)} search points")
+
+        all_businesses = []
+        seen_place_ids: Set[str] = set()
+
+        for idx, (lat, lng) in enumerate(grid_points, 1):
+            print(f"  Searching grid point {idx}/{len(grid_points)}...", end='\r')
+
+            try:
+                # Search from this grid point with smaller radius
+                results = self._single_point_search(
+                    (lat, lng),
+                    Config.GRID_SIZE_METERS,
+                    business_type,
+                    keyword
+                )
+
+                # Deduplicate
+                for result in results:
+                    place_id = result.get('place_id')
+                    if place_id and place_id not in seen_place_ids:
+                        seen_place_ids.add(place_id)
+                        all_businesses.append(result)
+
+                # Small delay to respect rate limits
+                time.sleep(0.2)
+
+            except Exception as e:
+                print(f"\n  Warning: Error at grid point {idx}: {e}")
+                continue
+
+        print(f"\n  Grid search complete: {len(all_businesses)} unique businesses found")
+        return all_businesses
 
     def get_business_details(self, place_id: str) -> Dict:
         """
