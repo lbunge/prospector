@@ -344,7 +344,7 @@ class GoogleMapsScaper:
                 'website',
                 'url',  # Google Maps URL
                 'business_status',
-                'types',
+                'type',  # Changed from 'types' - Google API uses singular
                 'price_level',
                 'rating',
                 'user_ratings_total',
@@ -354,7 +354,7 @@ class GoogleMapsScaper:
                 'plus_code',
                 'utc_offset',
                 'reviews',
-                'photos',
+                'photo',  # Changed from 'photos' - Google API uses singular
                 'editorial_summary'
             ]
         )
@@ -380,7 +380,7 @@ class GoogleMapsScaper:
             'location': basic_info.get('geometry', {}).get('location', {}),
             'rating': basic_info.get('rating'),
             'user_ratings_total': basic_info.get('user_ratings_total'),
-            'types': basic_info.get('types', []),
+            'types': basic_info.get('types', []),  # Nearby search uses 'types'
             'business_status': basic_info.get('business_status'),
             'price_level': basic_info.get('price_level'),
         }
@@ -399,7 +399,11 @@ class GoogleMapsScaper:
             })
 
             # Extract categories/industry
-            types = detailed_info.get('types', business.get('types', []))
+            # Place details API returns 'type' (singular field name) but may contain array
+            types = detailed_info.get('type', business.get('types', []))
+            # Ensure types is always a list
+            if not isinstance(types, list):
+                types = [types] if types else []
             business['industry'] = self._extract_primary_category(types)
             business['categories'] = types
 

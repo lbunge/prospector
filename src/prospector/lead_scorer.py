@@ -204,12 +204,13 @@ class LeadScorer:
             score += 2
 
         # Google Maps photos (0-2 points)
-        photos = data.get('photos', [])
+        photos = data.get('photos', []) or []
         if len(photos) > 0:
             score += 2
 
         # Has Google Maps reviews (0-1 point)
-        if data.get('user_ratings_total', 0) > 0:
+        user_ratings = data.get('user_ratings_total') or 0
+        if user_ratings > 0:
             score += 1
 
         return min(score, 15)
@@ -223,8 +224,8 @@ class LeadScorer:
         score = 0.0
 
         # Google rating (0-7 points)
-        rating = data.get('rating')
-        if rating:
+        rating = data.get('rating') or 0
+        if rating > 0:
             # 4.5-5.0 = 7 points, 4.0-4.4 = 5 points, 3.5-3.9 = 3 points, <3.5 = 1 point
             if rating >= 4.5:
                 score += 7
@@ -236,7 +237,7 @@ class LeadScorer:
                 score += 1
 
         # Review count (0-5 points)
-        review_count = data.get('user_ratings_total', 0)
+        review_count = data.get('user_ratings_total') or 0
         if review_count >= 100:
             score += 5
         elif review_count >= 50:
@@ -249,9 +250,9 @@ class LeadScorer:
             score += 1
 
         # Yelp rating (0-3 points)
-        yelp_data = data.get('yelp_data', {})
-        yelp_rating = yelp_data.get('yelp_rating')
-        if yelp_rating:
+        yelp_data = data.get('yelp_data', {}) or {}
+        yelp_rating = yelp_data.get('yelp_rating') or 0
+        if yelp_rating > 0:
             if yelp_rating >= 4.0:
                 score += 3
             elif yelp_rating >= 3.5:
@@ -274,15 +275,15 @@ class LeadScorer:
             score += 4
 
         # Multiple locations might mean bigger opportunity (0-3 points)
-        review_count = data.get('user_ratings_total', 0)
+        review_count = data.get('user_ratings_total') or 0
         if review_count >= 100:
             score += 3
         elif review_count >= 50:
             score += 2
 
         # Price level (0-3 points) - higher price might mean bigger budgets
-        price_level = data.get('price_level')
-        if price_level:
+        price_level = data.get('price_level') or 0
+        if price_level > 0:
             score += min(price_level, 3)
 
         return min(score, 10)
