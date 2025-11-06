@@ -68,9 +68,9 @@ Common business types:
 
     parser.add_argument(
         '-f', '--format',
-        choices=['csv', 'json', 'excel', 'all'],
+        choices=['csv', 'json', 'excel', 'hubspot', 'all'],
         default='all',
-        help='Export format (default: all)'
+        help='Export format (default: all, includes HubSpot)'
     )
 
     parser.add_argument(
@@ -156,7 +156,7 @@ Common business types:
         exporter = DataExporter()
 
         if args.format == 'all':
-            exports = exporter.export_all_formats(businesses, args.output)
+            exports = exporter.export_all_formats(businesses, args.output, include_hubspot=True)
             print(f"\n✓ Exported to {len(exports)} formats")
         elif args.format == 'csv':
             exporter.export_to_csv(businesses, args.output)
@@ -164,6 +164,8 @@ Common business types:
             exporter.export_to_json(businesses, args.output)
         elif args.format == 'excel':
             exporter.export_to_excel(businesses, args.output)
+        elif args.format == 'hubspot':
+            exporter.export_to_hubspot(businesses, args.output)
 
         print(f"\n{'='*60}")
         print("Prospecting Complete!")

@@ -6,6 +6,7 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Dict
 from .config import Config
+from .hubspot_exporter import HubSpotExporter
 
 
 class DataExporter:
@@ -20,6 +21,7 @@ class DataExporter:
         """
         self.output_dir = output_dir or Config.OUTPUT_DIR
         self.output_dir.mkdir(exist_ok=True)
+        self.hubspot_exporter = HubSpotExporter()
 
     def export_to_csv(
         self,
@@ -291,10 +293,38 @@ class DataExporter:
 
         return pd.DataFrame(rows)
 
+    def export_to_hubspot(
+        self,
+        businesses: List[Dict],
+        filename: str = None
+    ) -> Path:
+        """
+        Export to HubSpot-compatible CSV format.
+
+        Args:
+            businesses: List of business dictionaries
+            filename: Output filename
+
+        Returns:
+            Path to exported file
+        """
+        if not filename:
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            filename = f"hubspot_import_{timestamp}.csv"
+
+        filepath = self.output_dir / filename
+
+        return self.hubspot_exporter.export_to_hubspot_csv(
+            businesses,
+            filepath,
+            include_custom_fields=True
+        )
+
     def export_all_formats(
         self,
         businesses: List[Dict],
-        base_filename: str = None
+        base_filename: str = None,
+        include_hubspot: bool = True
     ) -> Dict[str, Path]:
         """
         Export to all available formats.
@@ -302,6 +332,7 @@ class DataExporter:
         Args:
             businesses: List of business dictionaries
             base_filename: Base filename (without extension)
+            include_hubspot: Include HubSpot export
 
         Returns:
             Dictionary mapping format to filepath
@@ -323,5 +354,10 @@ class DataExporter:
         # Excel
         excel_file = f"{base_filename}.xlsx"
         exports['excel'] = self.export_to_excel(businesses, excel_file)
+
+        # HubSpot
+        if include_hubspot:
+            hubspot_file = f"{base_filename}_hubspot.csv"
+            exports['hubspot'] = self.export_to_hubspot(businesses, hubspot_file)
 
         return exports
