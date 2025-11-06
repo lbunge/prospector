@@ -30,7 +30,9 @@ class BatchProcessor:
         process_func: Callable,
         batch_size: int = 10,
         job_name: str = None,
-        resume: bool = True
+        resume: bool = True,
+        stream_to_disk: bool = False,
+        stream_file: str = None
     ) -> List[Dict]:
         """
         Process items in batches with automatic checkpointing.
@@ -41,15 +43,25 @@ class BatchProcessor:
             batch_size: Number of items to process before checkpointing
             job_name: Unique name for this job (for checkpoint file)
             resume: Whether to resume from checkpoint if it exists
+            stream_to_disk: If True, write results to disk incrementally (for large datasets)
+            stream_file: Path to file for streaming output (used with stream_to_disk)
 
         Returns:
-            List of processed items
+            List of processed items (or path to streamed file if stream_to_disk=True)
         """
         # Generate job name if not provided
         if not job_name:
             job_name = f"job_{int(time.time())}"
 
         checkpoint_file = self.checkpoint_dir / f"{job_name}.json"
+
+        # Set up streaming if enabled
+        stream_handle = None
+        if stream_to_disk and stream_file:
+            stream_path = Path(stream_file)
+            stream_path.parent.mkdir(parents=True, exist_ok=True)
+            stream_handle = open(stream_path, 'w')
+            stream_handle.write('[\n')  # Start JSON array
 
         # Try to resume from checkpoint
         processed_items = []
@@ -74,7 +86,17 @@ class BatchProcessor:
             try:
                 # Process the item
                 processed_item = process_func(item)
-                processed_items.append(processed_item)
+
+                # If streaming, write to disk immediately
+                if stream_handle:
+                    json.dump(processed_item, stream_handle, indent=2)
+                    if i < total_items - 1:
+                        stream_handle.write(',\n')
+                    else:
+                        stream_handle.write('\n')
+                    stream_handle.flush()  # Ensure data is written
+                else:
+                    processed_items.append(processed_item)
 
                 # Progress update
                 if (i + 1) % 5 == 0 or i == total_items - 1:
@@ -83,18 +105,26 @@ class BatchProcessor:
 
                 # Checkpoint after each batch
                 if (i + 1) % batch_size == 0 or i == total_items - 1:
-                    self._save_checkpoint(
-                        checkpoint_file,
-                        {
-                            'job_name': job_name,
-                            'total_items': total_items,
-                            'last_index': i + 1,
-                            'processed_items': processed_items,
-                            'timestamp': datetime.now().isoformat(),
-                            'batch_size': batch_size
-                        }
-                    )
+                    # For streaming mode, only save minimal checkpoint (no data)
+                    checkpoint_data = {
+                        'job_name': job_name,
+                        'total_items': total_items,
+                        'last_index': i + 1,
+                        'timestamp': datetime.now().isoformat(),
+                        'batch_size': batch_size,
+                        'streaming_mode': stream_to_disk
+                    }
+
+                    # Only save processed items if not streaming (to save memory)
+                    if not stream_to_disk:
+                        checkpoint_data['processed_items'] = processed_items
+
+                    self._save_checkpoint(checkpoint_file, checkpoint_data)
                     logger.info(f"Checkpoint saved at {i + 1}/{total_items}")
+
+                    # Clear memory in streaming mode
+                    if stream_to_disk and processed_items:
+                        processed_items = []
 
             except Exception as e:
                 logger.error(f"Error processing item {i}: {e}")
@@ -115,11 +145,20 @@ class BatchProcessor:
                 print(f"Progress saved. You can resume with --resume flag.")
                 raise
 
+        # Close stream handle if used
+        if stream_handle:
+            stream_handle.write(']\n')  # Close JSON array
+            stream_handle.close()
+            logger.info(f"Streaming complete. Results written to {stream_file}")
+
         # Clean up checkpoint file after successful completion
         if checkpoint_file.exists():
             checkpoint_file.unlink()
             logger.info("Job completed successfully. Checkpoint file removed.")
 
+        # Return file path if streaming, otherwise return list
+        if stream_to_disk and stream_file:
+            return stream_file
         return processed_items
 
     def _save_checkpoint(self, checkpoint_file: Path, data: Dict):

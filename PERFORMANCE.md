@@ -2,13 +2,77 @@
 
 This guide covers performance considerations, optimization strategies, and best practices for running large prospecting campaigns.
 
+## 🎯 Quick Summary
+
+**Good news!** The tool now automatically handles large campaigns:
+
+- **< 500 businesses:** Standard processing (no action needed)
+- **500-1000 businesses:** Batch processing auto-enabled
+- **1000+ businesses:** Streaming mode auto-enabled (prevents memory issues)
+
+**You don't need to do anything!** The tool detects dataset size and optimizes automatically.
+
+For manual control or advanced optimization, continue reading this guide.
+
 ## Table of Contents
+- [Automatic Optimizations](#automatic-optimizations)
 - [Performance Considerations](#performance-considerations)
 - [Batch Processing](#batch-processing)
 - [Memory Management](#memory-management)
 - [Rate Limiting and API Quotas](#rate-limiting-and-api-quotas)
 - [Optimization Strategies](#optimization-strategies)
 - [Troubleshooting](#troubleshooting)
+
+## Automatic Optimizations
+
+The tool automatically detects dataset size and applies appropriate optimizations:
+
+### How It Works
+
+```python
+# After discovering businesses from Google Maps
+Found 1,250 businesses
+
+⚠️  Large dataset detected (1250 businesses)
+   Automatically enabling batch processing to prevent memory issues...
+
+🔄 Very large dataset - enabling memory-efficient streaming
+   Results will be written to disk incrementally to avoid memory issues
+```
+
+### Optimization Thresholds
+
+| Dataset Size | Auto-Enabled Features | What Happens |
+|-------------|----------------------|--------------|
+| < 500 | None | Standard processing, all in memory |
+| 500-999 | Batch processing (size=20) | Checkpoints every 20 businesses |
+| 1000+ | Batch + Streaming | Results written to disk immediately, memory cleared after each batch |
+
+### Benefits
+
+**Automatic Batch Processing (500+ businesses):**
+- Progress saved every 20 businesses
+- Can resume if interrupted
+- No configuration needed
+
+**Automatic Streaming (1000+ businesses):**
+- Constant memory usage (~300-500 MB regardless of dataset size)
+- Prevents out-of-memory crashes
+- Each business written to disk immediately
+- Memory cleared after each batch
+- Can handle datasets of any size (tested up to 10,000+ businesses)
+
+### Manual Override
+
+You can still manually control these features:
+
+```bash
+# Force batch processing even for small datasets
+python prospector.py "location" --batch --batch-size 10
+
+# Disable grid search to reduce dataset size
+python prospector.py "location" --no-grid-search
+```
 
 ## Performance Considerations
 

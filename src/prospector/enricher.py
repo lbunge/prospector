@@ -268,10 +268,26 @@ class BusinessEnricher:
 
         print(f"\nFound {len(businesses)} businesses")
 
+        # Automatically enable batch processing for large datasets
+        use_streaming = False
+        if len(businesses) >= 500 and not self.batch_processor:
+            print(f"\n⚠️  Large dataset detected ({len(businesses)} businesses)")
+            print(f"   Automatically enabling batch processing to prevent memory issues...")
+            self.batch_processor = BatchProcessor()
+            Config.USE_BATCH_PROCESSING = True
+            Config.BATCH_SIZE = 20  # Larger batch size for big datasets
+
+        # Enable memory-efficient streaming for very large datasets
+        if len(businesses) >= 1000:
+            use_streaming = True
+            print(f"\n🔄 Very large dataset - enabling memory-efficient streaming")
+            print(f"   Results will be written to disk incrementally to avoid memory issues\n")
+
         # Step 2: Enrich with emails and social media
         if find_emails or find_social:
             print(f"\nStep 2: Enriching business data...")
-            print(f"  Using {'batch processing with checkpoints' if self.batch_processor else 'standard processing'}\n")
+            mode = 'streaming mode' if use_streaming else ('batch processing with checkpoints' if self.batch_processor else 'standard processing')
+            print(f"  Using {mode}\n")
 
         # Use batch processing if enabled
         if self.batch_processor:
@@ -285,13 +301,32 @@ class BusinessEnricher:
                 print(f"\nEnriching: {business['name']}")
                 return self._enrich_business_data(business, find_emails, find_social)
 
-            enriched_businesses = self.batch_processor.process_in_batches(
+            # Set up streaming file if needed
+            stream_file = None
+            if use_streaming:
+                import tempfile
+                Config.OUTPUT_DIR.mkdir(exist_ok=True)
+                stream_file = str(Config.OUTPUT_DIR / f"streaming_{job_hash}.json")
+
+            result = self.batch_processor.process_in_batches(
                 items=businesses,
                 process_func=enrich_func,
                 batch_size=Config.BATCH_SIZE if hasattr(Config, 'BATCH_SIZE') else 10,
                 job_name=job_name,
-                resume=True
+                resume=True,
+                stream_to_disk=use_streaming,
+                stream_file=stream_file
             )
+
+            # If streaming, load the file back (for compatibility with existing code)
+            if use_streaming and isinstance(result, str):
+                print(f"\n💾 Loading streamed results from disk...")
+                import json
+                with open(result, 'r') as f:
+                    enriched_businesses = json.load(f)
+                print(f"   Loaded {len(enriched_businesses)} businesses from {result}")
+            else:
+                enriched_businesses = result
         else:
             # Standard processing (old way)
             enriched_businesses = []

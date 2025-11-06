@@ -137,10 +137,10 @@ class LeadScorer:
             score += 3
 
         # Business is open (0-5 points)
-        business_status = data.get('business_status', '').lower()
-        if business_status == 'operational':
+        business_status = data.get('business_status') or ''
+        if business_status.lower() == 'operational':
             score += 5
-        elif business_status == 'open':
+        elif business_status.lower() == 'open':
             score += 5
 
         # Has verified phone (0-2 points)
