@@ -42,7 +42,7 @@ class FranchiseDetector:
 
         # Fitness
         'planet fitness', 'la fitness', 'anytime fitness', '24 hour fitness',
-        'gold's gym', 'golds gym',
+        "gold's gym", 'golds gym',
 
         # Services
         'great clips', 'sport clips', 'supercuts', 'fantastic sams',

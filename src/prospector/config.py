@@ -72,6 +72,12 @@ class Config:
     # Aggressive mode (finds more data but slower)
     AGGRESSIVE_MODE = False  # Enable all advanced features
 
+    # Batch processing and performance
+    USE_BATCH_PROCESSING = False  # Enable batch processing with checkpoints
+    BATCH_SIZE = 10  # Number of businesses to process before checkpointing
+    ENABLE_RESUME = True  # Allow resuming from checkpoints after interruption
+    MAX_CONCURRENT_REQUESTS = 3  # Max concurrent API requests (experimental)
+
     @classmethod
     def validate(cls):
         """Validate required configuration."""

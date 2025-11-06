@@ -113,6 +113,25 @@ Common business types:
         help='Maximum pages to crawl per website (default: 10, aggressive: 15)'
     )
 
+    parser.add_argument(
+        '--batch',
+        action='store_true',
+        help='Enable batch processing with checkpoints (for large datasets)'
+    )
+
+    parser.add_argument(
+        '--batch-size',
+        type=int,
+        default=10,
+        help='Number of businesses to process before saving checkpoint (default: 10)'
+    )
+
+    parser.add_argument(
+        '--resume',
+        action='store_true',
+        help='Resume from previous checkpoint if available'
+    )
+
     args = parser.parse_args()
 
     try:
@@ -134,8 +153,17 @@ Common business types:
         if args.max_pages:
             Config.MAX_PAGES_PER_WEBSITE = args.max_pages
 
+        # Batch processing settings
+        if args.batch:
+            Config.USE_BATCH_PROCESSING = True
+            Config.BATCH_SIZE = args.batch_size
+            print(f"📦 Batch processing enabled (batch size: {args.batch_size})")
+            print(f"   Progress will be saved every {args.batch_size} businesses")
+            if args.resume:
+                print(f"   Will resume from checkpoint if available")
+
         # Initialize enricher
-        enricher = BusinessEnricher()
+        enricher = BusinessEnricher(use_batch_processing=Config.USE_BATCH_PROCESSING)
 
         # Run prospecting
         businesses = enricher.prospect_area(

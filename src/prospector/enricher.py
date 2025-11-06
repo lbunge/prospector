@@ -10,18 +10,20 @@ from .email_validator import EmailValidator
 from .phone_validator import PhoneValidator
 from .franchise_detector import FranchiseDetector
 from .lead_scorer import LeadScorer
+from .batch_processor import BatchProcessor, RateLimiter
 from .config import Config
 
 
 class BusinessEnricher:
     """Enrich business data with emails and additional comprehensive information."""
 
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, use_batch_processing: bool = False):
         """
         Initialize the business enricher.
 
         Args:
             api_key: Google Maps API key
+            use_batch_processing: Whether to use batch processing with checkpointing
         """
         self.maps_scraper = GoogleMapsScaper(api_key)
         self.email_finder = EmailFinder()
@@ -31,6 +33,201 @@ class BusinessEnricher:
         self.phone_validator = PhoneValidator()
         self.franchise_detector = FranchiseDetector()
         self.lead_scorer = LeadScorer()
+        self.batch_processor = BatchProcessor() if use_batch_processing else None
+        self.rate_limiter = RateLimiter(calls_per_second=2.0)  # Conservative rate limiting
+
+    def _enrich_business_data(self, business: Dict, find_emails: bool = True, find_social: bool = True) -> Dict:
+        """
+        Enrich a single business with all available data sources.
+
+        This method is extracted for use with batch processing.
+
+        Args:
+            business: Business data from Google Maps
+            find_emails: Whether to scrape websites for emails
+            find_social: Whether to find social media profiles
+
+        Returns:
+            Enriched business data
+        """
+        enriched = business.copy()
+
+        # Initialize email and social fields
+        enriched['emails_found'] = []
+        enriched['email_count'] = 0
+        enriched['generic_emails'] = []
+        enriched['person_emails'] = []
+        enriched['social_media'] = {}
+        enriched['website_method'] = None
+
+        # Step 1: Try to find website if not provided by Google
+        website = business.get('website')
+        if not website and (find_emails or find_social):
+            try:
+                website_result = self.website_finder.find_website(
+                    business['name'],
+                    business.get('formatted_address') or business.get('address'),
+                    business.get('phone')
+                )
+
+                if website_result['website']:
+                    website = website_result['website']
+                    enriched['website'] = website
+                    enriched['website_method'] = website_result['method']
+                    enriched['website_confidence'] = website_result['confidence']
+
+                time.sleep(0.3)
+
+            except Exception as e:
+                pass  # Silent fail in batch mode
+
+        # Step 2: Find social media
+        if find_social and website:
+            try:
+                enriched['social_media'] = self.email_finder.find_social_media(website)
+
+                # Try to find website from social media if we don't have one
+                if not website:
+                    social_website = self.website_finder.enrich_from_social_media(
+                        enriched['social_media']
+                    )
+                    if social_website:
+                        website = social_website
+                        enriched['website'] = website
+                        enriched['website_method'] = 'social_media'
+
+            except Exception as e:
+                pass
+
+        # Step 3: Find emails from website
+        if find_emails and website:
+            try:
+                email_result = self.email_finder.find_emails_from_website(website)
+
+                if email_result['status'] == 'success':
+                    enriched['emails_found'] = email_result['emails']
+                    enriched['email_count'] = len(email_result['emails'])
+                    enriched['pages_crawled'] = email_result.get('pages_crawled', 0)
+
+                    # Separate generic and person emails
+                    enriched['generic_emails'] = [
+                        e['email'] for e in email_result['emails']
+                        if e['type'] == 'generic'
+                    ]
+                    enriched['person_emails'] = [
+                        e['email'] for e in email_result['emails']
+                        if e['type'] == 'person'
+                    ]
+
+                time.sleep(0.5)
+
+            except Exception as e:
+                pass
+
+        # Step 4: Yelp enrichment
+        if Config.ENRICH_WITH_YELP and self.yelp_enricher.is_available():
+            try:
+                yelp_data = self.yelp_enricher.find_business(
+                    enriched['name'],
+                    enriched.get('formatted_address') or enriched.get('address'),
+                    enriched.get('phone'),
+                    enriched.get('location', {}).get('lat'),
+                    enriched.get('location', {}).get('lng')
+                )
+
+                if yelp_data:
+                    yelp_info = self.yelp_enricher.extract_yelp_info(yelp_data)
+                    enriched['yelp_data'] = yelp_info
+
+                    # Analyze reviews
+                    if Config.ANALYZE_REVIEWS and yelp_info.get('recent_reviews'):
+                        analysis = self.yelp_enricher.analyze_reviews(yelp_info['recent_reviews'])
+                        enriched['review_analysis'] = analysis
+
+                time.sleep(0.3)
+
+            except Exception as e:
+                pass
+
+        # Step 5: Email validation and enrichment
+        if Config.VALIDATE_EMAILS and enriched.get('emails_found'):
+            try:
+                enriched['emails_found'] = self.email_validator.enrich_emails_with_validation(
+                    enriched['emails_found'],
+                    validate=True
+                )
+
+                time.sleep(0.2)
+
+            except Exception as e:
+                pass
+
+        # Step 6: Email permutation (find additional emails)
+        if Config.PERMUTE_EMAILS and website:
+            try:
+                domain = self.email_validator._extract_domain(website)
+                if domain:
+                    # Generate role-based emails
+                    decision_maker_emails = self.email_validator.find_decision_maker_emails(
+                        enriched['name'],
+                        domain,
+                        self.phone_validator.extract_area_code(enriched.get('phone') or '')
+                    )
+
+                    if decision_maker_emails:
+                        # Add to emails list (marked as generated)
+                        for email_info in decision_maker_emails:
+                            if email_info not in enriched['emails_found']:
+                                enriched['emails_found'].append(email_info)
+                                enriched['email_count'] = len(enriched['emails_found'])
+
+            except Exception as e:
+                pass
+
+        # Step 7: Phone validation
+        if Config.VALIDATE_PHONES and enriched.get('phone'):
+            try:
+                phone_validation = self.phone_validator.validate_and_format(
+                    enriched['phone']
+                )
+                enriched['phone_validation'] = phone_validation
+
+            except Exception as e:
+                pass
+
+        # Step 8: Franchise detection
+        if Config.DETECT_FRANCHISES:
+            try:
+                franchise_detection = self.franchise_detector.detect_franchise(
+                    enriched['name'],
+                    enriched.get('website'),
+                    enriched.get('phone'),
+                    enriched.get('formatted_address') or enriched.get('address'),
+                    enriched.get('categories')
+                )
+                enriched['franchise_detection'] = franchise_detection
+
+                # Find local contact hints
+                local_hints = self.franchise_detector.find_local_contact_hints(enriched)
+                enriched['local_contact_hints'] = local_hints
+
+                # Prioritize local contacts
+                if Config.PRIORITIZE_LOCAL_CONTACTS:
+                    enriched = self.franchise_detector.prioritize_local_contacts(enriched)
+
+            except Exception as e:
+                pass
+
+        # Step 9: Lead scoring
+        if Config.ENABLE_LEAD_SCORING:
+            try:
+                lead_score = self.lead_scorer.score_lead(enriched)
+                enriched['lead_score'] = lead_score
+
+            except Exception as e:
+                pass
+
+        return enriched
 
     def prospect_area(
         self,
@@ -74,242 +271,44 @@ class BusinessEnricher:
         # Step 2: Enrich with emails and social media
         if find_emails or find_social:
             print(f"\nStep 2: Enriching business data...")
+            print(f"  Using {'batch processing with checkpoints' if self.batch_processor else 'standard processing'}\n")
 
-        enriched_businesses = []
-        for idx, business in enumerate(businesses, 1):
-            print(f"\n[{idx}/{len(businesses)}] Enriching: {business['name']}")
+        # Use batch processing if enabled
+        if self.batch_processor:
+            import hashlib
+            # Generate job name from search parameters
+            job_hash = hashlib.md5(f"{location}_{radius}_{business_type}_{keyword}".encode()).hexdigest()[:8]
+            job_name = f"prospect_{job_hash}"
 
-            enriched = business.copy()
+            # Define the enrichment function to use with batch processor
+            def enrich_func(business):
+                print(f"\nEnriching: {business['name']}")
+                return self._enrich_business_data(business, find_emails, find_social)
 
-            # Initialize email and social fields
-            enriched['emails_found'] = []
-            enriched['email_count'] = 0
-            enriched['generic_emails'] = []
-            enriched['person_emails'] = []
-            enriched['social_media'] = {}
-            enriched['website_method'] = None
+            enriched_businesses = self.batch_processor.process_in_batches(
+                items=businesses,
+                process_func=enrich_func,
+                batch_size=Config.BATCH_SIZE if hasattr(Config, 'BATCH_SIZE') else 10,
+                job_name=job_name,
+                resume=True
+            )
+        else:
+            # Standard processing (old way)
+            enriched_businesses = []
+            for idx, business in enumerate(businesses, 1):
+                print(f"\n[{idx}/{len(businesses)}] Enriching: {business['name']}")
+                enriched = self._enrich_business_data(business, find_emails, find_social)
 
-            # Step 1: Try to find website if not provided by Google
-            website = business.get('website')
-            if not website and (find_emails or find_social):
-                print(f"  → No website in Google Maps, searching...")
-                try:
-                    website_result = self.website_finder.find_website(
-                        business['name'],
-                        business.get('formatted_address') or business.get('address'),
-                        business.get('phone')
-                    )
+                # Print summary for this business
+                if enriched.get('website'):
+                    print(f"  ✓ Website: {enriched['website']}")
+                if enriched.get('email_count', 0) > 0:
+                    print(f"  ✓ Found {enriched['email_count']} emails")
+                if enriched.get('lead_score'):
+                    score = enriched['lead_score']
+                    print(f"  📊 Score: {score['total']}/100 ({score['grade']})")
 
-                    if website_result['website']:
-                        website = website_result['website']
-                        enriched['website'] = website
-                        enriched['website_method'] = website_result['method']
-                        enriched['website_confidence'] = website_result['confidence']
-                        print(f"  ✓ Found website: {website} ({website_result['method']})")
-                    else:
-                        print(f"  ✗ Could not find website")
-
-                    time.sleep(0.3)  # Be respectful
-
-                except Exception as e:
-                    print(f"  ✗ Error searching for website: {e}")
-
-            # Step 2: Find social media first (might help find website)
-            if find_social and website:
-                try:
-                    enriched['social_media'] = self.email_finder.find_social_media(website)
-
-                    if enriched['social_media']:
-                        platforms = ', '.join(enriched['social_media'].keys())
-                        print(f"  ✓ Found social media: {platforms}")
-
-                        # Try to find website from social media if we don't have one
-                        if not website:
-                            social_website = self.website_finder.enrich_from_social_media(
-                                enriched['social_media']
-                            )
-                            if social_website:
-                                website = social_website
-                                enriched['website'] = website
-                                enriched['website_method'] = 'social_media'
-                                print(f"  ✓ Found website from social media: {website}")
-
-                except Exception as e:
-                    print(f"  ✗ Error finding social media: {e}")
-
-            # Step 3: Find emails from website
-            if find_emails and website:
-                print(f"  → Searching for emails on website...")
-                try:
-                    email_result = self.email_finder.find_emails_from_website(website)
-
-                    if email_result['status'] == 'success':
-                        enriched['emails_found'] = email_result['emails']
-                        enriched['email_count'] = len(email_result['emails'])
-                        enriched['pages_crawled'] = email_result.get('pages_crawled', 0)
-
-                        # Separate generic and person emails
-                        enriched['generic_emails'] = [
-                            e['email'] for e in email_result['emails']
-                            if e['type'] == 'generic'
-                        ]
-                        enriched['person_emails'] = [
-                            e['email'] for e in email_result['emails']
-                            if e['type'] == 'person'
-                        ]
-
-                        if enriched['email_count'] > 0:
-                            print(f"  ✓ Found {enriched['email_count']} emails "
-                                  f"({len(enriched['generic_emails'])} generic, "
-                                  f"{len(enriched['person_emails'])} person) "
-                                  f"from {enriched['pages_crawled']} pages")
-                        else:
-                            print(f"  ○ No emails found on website")
-                    else:
-                        print(f"  ✗ Email search failed: {email_result['error']}")
-
-                    time.sleep(0.5)  # Be respectful with requests
-
-                except Exception as e:
-                    print(f"  ✗ Error finding emails: {e}")
-
-            elif not website:
-                print(f"  ○ No website available for scraping")
-
-            # Step 4: Yelp enrichment
-            if Config.ENRICH_WITH_YELP and self.yelp_enricher.is_available():
-                try:
-                    print(f"  → Enriching with Yelp data...")
-                    yelp_data = self.yelp_enricher.find_business(
-                        enriched['name'],
-                        enriched.get('formatted_address') or enriched.get('address'),
-                        enriched.get('phone'),
-                        enriched.get('location', {}).get('lat'),
-                        enriched.get('location', {}).get('lng')
-                    )
-
-                    if yelp_data:
-                        yelp_info = self.yelp_enricher.extract_yelp_info(yelp_data)
-                        enriched['yelp_data'] = yelp_info
-
-                        yelp_rating = yelp_info.get('yelp_rating')
-                        yelp_reviews = yelp_info.get('yelp_review_count', 0)
-                        if yelp_rating:
-                            print(f"  ✓ Yelp: {yelp_rating}★ ({yelp_reviews} reviews)")
-
-                        # Analyze reviews
-                        if Config.ANALYZE_REVIEWS and yelp_info.get('recent_reviews'):
-                            analysis = self.yelp_enricher.analyze_reviews(yelp_info['recent_reviews'])
-                            enriched['review_analysis'] = analysis
-
-                    time.sleep(0.3)
-
-                except Exception as e:
-                    print(f"  ✗ Error enriching with Yelp: {e}")
-
-            # Step 5: Email validation and enrichment
-            if Config.VALIDATE_EMAILS and enriched.get('emails_found'):
-                try:
-                    print(f"  → Validating emails...")
-                    enriched['emails_found'] = self.email_validator.enrich_emails_with_validation(
-                        enriched['emails_found'],
-                        validate=True
-                    )
-
-                    validated_count = sum(
-                        1 for e in enriched['emails_found']
-                        if e.get('is_deliverable', False)
-                    )
-                    if validated_count > 0:
-                        print(f"  ✓ {validated_count}/{len(enriched['emails_found'])} emails validated")
-
-                    time.sleep(0.2)
-
-                except Exception as e:
-                    print(f"  ✗ Error validating emails: {e}")
-
-            # Step 6: Email permutation (find additional emails)
-            if Config.PERMUTE_EMAILS and website:
-                try:
-                    domain = self.email_validator._extract_domain(website)
-                    if domain:
-                        # Generate role-based emails
-                        decision_maker_emails = self.email_validator.find_decision_maker_emails(
-                            enriched['name'],
-                            domain,
-                            self.phone_validator.extract_area_code(enriched.get('phone') or '')
-                        )
-
-                        if decision_maker_emails:
-                            print(f"  ✓ Generated {len(decision_maker_emails)} role-based emails")
-                            # Add to emails list (marked as generated)
-                            for email_info in decision_maker_emails:
-                                if email_info not in enriched['emails_found']:
-                                    enriched['emails_found'].append(email_info)
-                                    enriched['email_count'] = len(enriched['emails_found'])
-
-                except Exception as e:
-                    print(f"  ✗ Error generating email permutations: {e}")
-
-            # Step 7: Phone validation
-            if Config.VALIDATE_PHONES and enriched.get('phone'):
-                try:
-                    phone_validation = self.phone_validator.validate_and_format(
-                        enriched['phone']
-                    )
-                    enriched['phone_validation'] = phone_validation
-
-                    if phone_validation.get('valid'):
-                        formatted = phone_validation.get('formatted_national')
-                        phone_type = phone_validation.get('type', 'unknown')
-                        print(f"  ✓ Phone validated: {formatted} ({phone_type})")
-
-                except Exception as e:
-                    print(f"  ✗ Error validating phone: {e}")
-
-            # Step 8: Franchise detection
-            if Config.DETECT_FRANCHISES:
-                try:
-                    franchise_detection = self.franchise_detector.detect_franchise(
-                        enriched['name'],
-                        enriched.get('website'),
-                        enriched.get('phone'),
-                        enriched.get('formatted_address') or enriched.get('address'),
-                        enriched.get('categories')
-                    )
-                    enriched['franchise_detection'] = franchise_detection
-
-                    if franchise_detection.get('is_franchise'):
-                        chain = franchise_detection.get('chain_name', 'Unknown')
-                        print(f"  ℹ Detected as franchise: {chain}")
-                    elif franchise_detection.get('is_corporate'):
-                        print(f"  ℹ Detected as corporate location")
-                    else:
-                        print(f"  ✓ Local independent business")
-
-                    # Find local contact hints
-                    local_hints = self.franchise_detector.find_local_contact_hints(enriched)
-                    enriched['local_contact_hints'] = local_hints
-
-                    # Prioritize local contacts
-                    if Config.PRIORITIZE_LOCAL_CONTACTS:
-                        enriched = self.franchise_detector.prioritize_local_contacts(enriched)
-
-                except Exception as e:
-                    print(f"  ✗ Error detecting franchise: {e}")
-
-            # Step 9: Lead scoring
-            if Config.ENABLE_LEAD_SCORING:
-                try:
-                    lead_score = self.lead_scorer.score_lead(enriched)
-                    enriched['lead_score'] = lead_score
-
-                    print(f"  📊 Lead Score: {lead_score['total']}/100 (Grade: {lead_score['grade']}, Priority: {lead_score['priority']})")
-
-                except Exception as e:
-                    print(f"  ✗ Error calculating lead score: {e}")
-
-            enriched_businesses.append(enriched)
+                enriched_businesses.append(enriched)
 
         # Sort businesses by lead score (if scoring enabled)
         if Config.ENABLE_LEAD_SCORING:
